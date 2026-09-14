@@ -9,22 +9,19 @@ from livekit.agents import (
     AgentServer,
     AgentSession,
     AgentStateChangedEvent,
-    AgentTask,
+    ErrorEvent,
     JobContext,
     MetricsCollectedEvent,
     RunContext,
     ToolError,
+    UserInputTranscribedEvent,
     function_tool,
     inference,
     llm,
-    mcp,
     metrics,
-    room_io,
-    stt,
     tts,
 )
-from livekit.plugins import noise_cancellation, silero
-from livekit.plugins.turn_detector.multilingual import MultilingualModel
+from livekit.plugins import silero
 
 load_dotenv()
 
@@ -58,36 +55,6 @@ WMO_CONDITIONS = {
 }
 
 
-class CollectConsent(AgentTask[bool]):
-    def __init__(self, chat_ctx=None):
-        super().__init__(
-            instructions=(
-                "Ask for recording consent and get a clear yes or no answer. "
-                "Be polite and professional."
-            ),
-            chat_ctx=chat_ctx,
-        )
-
-    async def on_enter(self) -> None:
-        await self.session.generate_reply(
-            instructions=(
-                "Briefly introduce yourself, then ask for permission to record "
-                "the call for quality assurance and training purposes. "
-                "Make it clear that they can decline."
-            )
-        )
-
-    @function_tool()
-    async def consent_given(self) -> None:
-        """Use this when the user gives consent to record."""
-        self.complete(True)
-
-    @function_tool()
-    async def consent_denied(self) -> None:
-        """Use this when the user denies consent to record."""
-        self.complete(False)
-
-
 class ManagerAgent(Agent):
     def __init__(self, chat_ctx=None):
         super().__init__(
@@ -117,24 +84,18 @@ class CustomerServiceAgent(Agent):
             instructions=(
                 "You are an upbeat, slightly sarcastic voice AI for tech support. "
                 "Help the caller fix issues without rambling, and keep replies under 3 sentences. "
-                "You can look up the weather if asked. You can also answer questions about "
-                "LiveKit by searching the documentation. When users ask about LiveKit "
-                "features, APIs, or how to build something, use the docs search tools "
-                "to find accurate information. If they ask for a manager or you can't "
-                "resolve their issue, use the escalate_to_manager tool."
+                "You can look up the weather if asked. If they ask for a manager or you can't "
+                "resolve their issue, use the escalate_to_manager tool. Calls are not recorded."
             ),
         )
 
     async def on_enter(self) -> None:
-        consent = await CollectConsent(chat_ctx=self.chat_ctx)
-        if consent:
-            await self.session.generate_reply(
-                instructions="Thank them and offer your assistance."
+        await self.session.generate_reply(
+            instructions=(
+                "Introduce yourself briefly and offer your assistance. "
+                "Do not mention recording."
             )
-        else:
-            await self.session.generate_reply(
-                instructions="Let them know you understand and will proceed without recording."
-            )
+        )
 
     @function_tool()
     async def lookup_weather(
@@ -198,12 +159,7 @@ async def entrypoint(ctx: JobContext):
                 inference.LLM(model="google/gemini-2.5-flash"),
             ]
         ),
-        stt=stt.FallbackAdapter(
-            [
-                inference.STT.from_model_string("assemblyai/universal-streaming:en"),
-                inference.STT.from_model_string("deepgram/nova-3"),
-            ]
-        ),
+        stt=inference.STT.from_model_string("deepgram/nova-3"),
         tts=tts.FallbackAdapter(
             [
                 inference.TTS.from_model_string(CARTESIA_SUPPORT_VOICE),
@@ -211,11 +167,11 @@ async def entrypoint(ctx: JobContext):
             ]
         ),
         vad=vad,
-        turn_detection=MultilingualModel(),
-        preemptive_generation=True,
-        mcp_servers=[
-            mcp.MCPServerHTTP(url="https://docs.livekit.io/mcp"),
-        ],
+        turn_detection="vad",
+        preemptive_generation=False,
+        allow_interruptions=True,
+        min_endpointing_delay=0.4,
+        max_endpointing_delay=2.0,
     )
 
     usage_collector = metrics.UsageCollector()
@@ -229,8 +185,17 @@ async def entrypoint(ctx: JobContext):
         metrics.log_metrics(ev.metrics)
         usage_collector.collect(ev.metrics)
 
+    @session.on("user_input_transcribed")
+    def _on_user_input_transcribed(ev: UserInputTranscribedEvent):
+        logger.info("User transcript final=%s: %s", ev.is_final, ev.transcript)
+
+    @session.on("error")
+    def _on_error(ev: ErrorEvent):
+        logger.error("Session error: %s", ev.error)
+
     @session.on("agent_state_changed")
     def _on_agent_state_changed(ev: AgentStateChangedEvent):
+        logger.info("Agent state: %s -> %s", ev.old_state, ev.new_state)
         if ev.new_state == "speaking" and last_eou_metrics:
             elapsed = time.time() - last_eou_metrics.timestamp
             logger.info("Time to first audio: %.3fs", elapsed)
@@ -244,12 +209,7 @@ async def entrypoint(ctx: JobContext):
     await session.start(
         agent=CustomerServiceAgent(),
         room=ctx.room,
-        record=True,
-        room_options=room_io.RoomOptions(
-            audio_input=room_io.AudioInputOptions(
-                noise_cancellation=noise_cancellation.BVC(),
-            ),
-        ),
+        record=False,
     )
 
 
