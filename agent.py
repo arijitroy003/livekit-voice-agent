@@ -27,8 +27,18 @@ load_dotenv()
 
 logger = logging.getLogger(__name__)
 
-CARTESIA_SUPPORT_VOICE = "cartesia/sonic-3:9626c31c-bec5-4cca-baa8-f8ba9e84c8bc"
-CARTESIA_MANAGER_VOICE = "cartesia/sonic-3:6f84f4b8-58a2-430c-8c79-688dad597532"
+CARTESIA_SUPPORT_VOICE_ID = "9626c31c-bec5-4cca-baa8-f8ba9e84c8bc"
+CARTESIA_MANAGER_VOICE_ID = "6f84f4b8-58a2-430c-8c79-688dad597532"
+CARTESIA_SPEECH_SPEED = 0.90
+
+
+def cartesia_tts(voice_id: str) -> inference.TTS:
+    return inference.TTS(
+        model="cartesia/sonic-3",
+        voice=voice_id,
+        extra_kwargs={"speed": CARTESIA_SPEECH_SPEED},
+    )
+
 
 WMO_CONDITIONS = {
     0: "clear skies",
@@ -66,7 +76,7 @@ class ManagerAgent(Agent):
                 "professional."
             ),
             chat_ctx=chat_ctx,
-            tts=CARTESIA_MANAGER_VOICE,
+            tts=cartesia_tts(CARTESIA_MANAGER_VOICE_ID),
         )
 
     async def on_enter(self) -> None:
@@ -178,7 +188,7 @@ async def entrypoint(ctx: JobContext):
         stt=inference.STT.from_model_string("deepgram/nova-3"),
         tts=tts.FallbackAdapter(
             [
-                inference.TTS.from_model_string(CARTESIA_SUPPORT_VOICE),
+                cartesia_tts(CARTESIA_SUPPORT_VOICE_ID),
                 inference.TTS.from_model_string("inworld/inworld-tts-1"),
             ]
         ),
